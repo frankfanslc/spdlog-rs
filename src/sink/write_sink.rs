@@ -62,11 +62,9 @@ where
         let mut string_buf = StringBuf::new();
         self.formatter.read().format(record, &mut string_buf)?;
 
-        let mut locked_target = self
-            .target
+        self.target
             .lock()
-            .map_err(|err| Error::LockMutex(format!("{}", err)))?;
-        locked_target
+            .expect(MUTEX_POISONED_MESSAGE)
             .write_all(string_buf.as_bytes())
             .map_err(Error::WriteRecord)?;
 
@@ -76,8 +74,9 @@ where
     fn flush(&self) -> Result<()> {
         self.target
             .lock()
-            .map_err(|err| Error::LockMutex(format!("{}", err)))
-            .and_then(|mut locked_target| locked_target.flush().map_err(Error::FlushBuffer))
+            .expect(MUTEX_POISONED_MESSAGE)
+            .flush()
+            .map_err(Error::FlushBuffer)
     }
 
     fn level_filter(&self) -> LevelFilter {
@@ -99,21 +98,22 @@ where
     W: Write + Send,
 {
     fn drop(&mut self) {
-        match self.target.lock() {
-            Ok(mut locked_target) => {
-                if let Err(err) = locked_target.flush() {
-                    // Sinks do not have an error handler, because it would increase complexity and
-                    // the error is not common. So currently users cannot handle this error by
-                    // themselves.
-                    crate::default_error_handler("WriteSink", Error::FlushBuffer(err));
-                }
-            }
-            Err(err) => {
-                crate::default_error_handler("WriteSink", Error::LockMutex(format!("{}", err)));
-            }
+        let flush_result = self
+            .target
+            .lock()
+            .expect(MUTEX_POISONED_MESSAGE)
+            .flush()
+            .map_err(Error::FlushBuffer);
+        if let Err(err) = flush_result {
+            // Sinks do not have an error handler, because it would increase complexity and
+            // the error is not common. So currently users cannot handle this error by
+            // themselves.
+            crate::default_error_handler("WriteSink", err);
         }
     }
 }
+
+const MUTEX_POISONED_MESSAGE: &'static str = "mutex is poisoned";
 
 #[cfg(test)]
 mod tests {

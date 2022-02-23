@@ -70,13 +70,6 @@ pub enum Error {
     /// [`from_str`]: std::str::FromStr::from_str
     #[error("attempted to convert a string that doesn't match an existing log level: {0}")]
     ParseLevel(String),
-
-    /// The variant returned by [`Sink`]s where an error occurs when trying to
-    /// lock a mutex.
-    ///
-    /// [`Sink`]: crate::sink::Sink
-    #[error("mutex lock error")]
-    LockMutex(String),
 }
 
 /// The result type of this crate.
