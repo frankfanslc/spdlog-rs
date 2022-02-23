@@ -1,4 +1,8 @@
-use std::{io::Write, mem, sync::atomic::Ordering};
+use std::{
+    io::Write,
+    mem,
+    sync::{self, atomic::Ordering},
+};
 
 use atomic::Atomic;
 
@@ -8,26 +12,40 @@ use crate::{
     Error, Record, Result, Sink, StringBuf,
 };
 
-/// A sink with a generic that implements [`Write`] trait as the target
+/// A sink that writes log messages into an arbitrary `impl Write` object.
+///
+/// # Performance Notice
+///
+/// Since `WriteSink` can write into any `impl Write` objects, the assumptions made on the underlying `impl Write`
+/// object is very weak and this does impact performance. You should use other sinks or implement your own sinks
+/// whenever possible. `WriteSink` is your last resort if no other sinks meet your requirement.
+///
+/// If you want to log into a file, use [`FileSink`] or [`RotatingFileSink`] instead.
+///
+/// If you want to log into the standard streams, use [`StdStreamSink`] instead.
+///
+/// [`FileSink`]: crate::sink::FileSink
+/// [`RotatingFileSink`]: crate::sink::RotatingFileSink
+/// [`StdStreamSink`]: crate::sink::StdStreamSink
 pub struct WriteSink<W>
 where
     W: Write + Send,
 {
     level_filter: Atomic<LevelFilter>,
     formatter: spin::RwLock<Box<dyn Formatter>>,
-    target: spin::Mutex<W>,
+    target: sync::Mutex<W>,
 }
 
 impl<W> WriteSink<W>
 where
     W: Write + Send,
 {
-    /// Constructs a `WriteSink`.
+    /// Constructs a `WriteSink` that writes log messages into the given `impl Write` object.
     pub fn new(target: W) -> Self {
         Self {
             level_filter: Atomic::new(LevelFilter::All),
             formatter: spin::RwLock::new(Box::new(FullFormatter::new())),
-            target: spin::Mutex::new(target),
+            target: sync::Mutex::new(target),
         }
     }
 }
@@ -44,8 +62,11 @@ where
         let mut string_buf = StringBuf::new();
         self.formatter.read().format(record, &mut string_buf)?;
 
-        self.target
+        let mut locked_target = self
+            .target
             .lock()
+            .map_err(|err| Error::LockMutex(format!("{}", err)))?;
+        locked_target
             .write_all(string_buf.as_bytes())
             .map_err(Error::WriteRecord)?;
 
@@ -53,7 +74,10 @@ where
     }
 
     fn flush(&self) -> Result<()> {
-        self.target.lock().flush().map_err(Error::FlushBuffer)
+        self.target
+            .lock()
+            .map_err(|err| Error::LockMutex(format!("{}", err)))
+            .and_then(|mut locked_target| locked_target.flush().map_err(Error::FlushBuffer))
     }
 
     fn level_filter(&self) -> LevelFilter {
@@ -75,11 +99,18 @@ where
     W: Write + Send,
 {
     fn drop(&mut self) {
-        if let Err(err) = self.target.lock().flush() {
-            // Sinks do not have an error handler, because it would increase complexity and
-            // the error is not common. So currently users cannot handle this error by
-            // themselves.
-            crate::default_error_handler("WriteSink", Error::FlushBuffer(err));
+        match self.target.lock() {
+            Ok(mut locked_target) => {
+                if let Err(err) = locked_target.flush() {
+                    // Sinks do not have an error handler, because it would increase complexity and
+                    // the error is not common. So currently users cannot handle this error by
+                    // themselves.
+                    crate::default_error_handler("WriteSink", Error::FlushBuffer(err));
+                }
+            }
+            Err(err) => {
+                crate::default_error_handler("WriteSink", Error::LockMutex(format!("{}", err)));
+            }
         }
     }
 }
